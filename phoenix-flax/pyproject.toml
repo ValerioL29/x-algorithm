@@ -1,0 +1,14 @@
+[project]
+name = "phoenix-flax"
+version = "0.1.0"
+description = "Phoenix ranking model in Flax"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "jax[cuda12]==0.8.1",
+    "flax>=0.10.0",
+    "optax",
+    "pyarrow",
+    "pandas",
+    "numpy>=1.26.4",
+]

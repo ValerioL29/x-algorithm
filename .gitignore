@@ -1,1 +1,6 @@
 __pycache__/
+.venv/
+datasets/
+*.parquet
+training*.log
+torchrec_minimal_ranking_example.py

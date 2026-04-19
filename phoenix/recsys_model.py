@@ -38,8 +38,7 @@ class HashConfig:
     num_author_hashes: int = 2
 
 
-@dataclass
-class RecsysEmbeddings:
+class RecsysEmbeddings(NamedTuple):
     """Container for pre-looked-up embeddings from the embedding tables.
 
     These embeddings are looked up from hash tables before being passed to the model.
