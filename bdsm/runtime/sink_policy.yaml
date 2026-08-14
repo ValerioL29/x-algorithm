@@ -1,0 +1,35 @@
+
+version: "2026-08-13"
+
+# Public-release note: the per-head operating points below (the 2-D
+
+min_actions_for_enforcement: 30
+
+thresholds:
+  FollowBot:           [9.99, 9.99]
+  EngagementAmplifier: [9.99, 9.99]
+  RTBot:               [9.99, 9.99]
+
+cusp_delta: 9.99
+cusp_heads:
+  EngagementAmplifier: [9.99, 9.99]
+
+paused_liveness_thresholds:
+  LikeBot:        [9.99, 9.99]
+  MultiActionBot: [9.99, 9.99]
+
+spam_bounce_thresholds:
+  TweetSpamBot: [9.99, 9.99]
+  ReplySpamBot: [9.99, 9.99]
+
+spam_bounce_action_key:
+  TweetSpamBot: create
+  ReplySpamBot: reply
+
+official_client_app_ids: [3033300, 129032, 258901, 191841]
+
+reply_spam_hard_suspend_tau: 9.99
+
+notes: >
+  2026-08-13: enforcement policy for the 8-head behavioral model.
+  Operating points are redacted in this export (9.99 sentinel).

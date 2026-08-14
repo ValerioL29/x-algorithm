@@ -1,0 +1,24 @@
+import <strato/featureswitches>
+
+val userRoles = Set(
+  "birdwatch_team",
+)
+
+val fs = featureswitches.build({
+  getParamValue = { case (paramName, recipient) =>
+    #<visibility/under-the-hood/featureSwitches>.fetch(paramName, recipient).v
+  },
+  userRoles = Some(userRoles),
+})
+
+val underTheHoodReportEnabled =
+  fs.booleanParam("under_the_hood_report_enabled", false)
+
+Library({
+  export = {
+    underTheHoodReportEnabled = underTheHoodReportEnabled,
+  },
+  description = PlainText("Feature switch params for Under the Hood"),
+  contactInfo = <visibility/under-the-hood/sharedConfig>.contactInfo,
+  lifecycle = Production,
+})

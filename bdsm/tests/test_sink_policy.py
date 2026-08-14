@@ -1,0 +1,45 @@
+import dataclasses
+import importlib.util
+import os
+
+import pytest
+
+pytest.importorskip("requests")
+pytest.importorskip("yaml")
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_RUNTIME = os.path.join(_ROOT, "runtime")
+
+
+def _load_sink_module():
+    spec = importlib.util.spec_from_file_location(
+        "score_results_sink_focal",
+        os.path.join(_RUNTIME, "score_results_sink_focal.py"),
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_shipped_policy_matches_baked_in_defaults():
+    m = _load_sink_module()
+    pol = m._load_policy(os.path.join(_RUNTIME, "sink_policy.yaml"))
+    got = dataclasses.asdict(pol)
+    want = dataclasses.asdict(m.DEFAULT_POLICY)
+    for k in ("version", "source"):
+        got.pop(k)
+        want.pop(k)
+    assert got == want, "sink_policy.yaml drifted from the baked-in defaults"
+
+
+def test_missing_policy_file_falls_back_to_defaults():
+    m = _load_sink_module()
+    assert m._load_policy("/nonexistent/sink_policy.yaml") is m.DEFAULT_POLICY
+
+
+def test_invalid_policy_key_fails_loudly(tmp_path):
+    m = _load_sink_module()
+    bad = tmp_path / "bad_policy.yaml"
+    bad.write_text("version: x\nnot_a_policy_key: 1\n")
+    with pytest.raises(ValueError):
+        m._load_policy(str(bad))

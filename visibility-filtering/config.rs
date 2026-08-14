@@ -1,0 +1,137 @@
+pub const ENV_GRPC_MTLS_ENABLED: &str = "GRPC_MTLS_ENABLED";
+pub const ENV_GRPC_MTLS_SERVER_KEY_PATH: &str = "GRPC_MTLS_SERVER_KEY_PATH";
+pub const ENV_GRPC_MTLS_SERVER_CRT_PATH: &str = "GRPC_MTLS_SERVER_CRT_PATH";
+pub const ENV_GRPC_MTLS_SERVER_CHAIN_PATH: &str = "GRPC_MTLS_SERVER_CHAIN_PATH";
+pub const ENV_GRPC_MTLS_CLIENT_CA_PATH: &str = "GRPC_MTLS_CLIENT_CA_PATH";
+pub const ENV_FALLBACK_CACHE_SERVE_STALE_ENABLED: &str = "VF_FALLBACK_CACHE_SERVE_STALE_ENABLED";
+pub const ENV_FALLBACK_CACHE_POPULATE_ENABLED: &str = "VF_FALLBACK_CACHE_POPULATE_ENABLED";
+pub const ENV_MEDIA_FALLBACK_CACHE_SERVE_STALE_ENABLED: &str =
+    "VF_MEDIA_FALLBACK_CACHE_SERVE_STALE_ENABLED";
+pub const ENV_MEDIA_FALLBACK_CACHE_POPULATE_ENABLED: &str =
+    "VF_MEDIA_FALLBACK_CACHE_POPULATE_ENABLED";
+
+pub fn fallback_cache_serve_stale_enabled() -> bool {
+    parse_env_flag(
+        std::env::var(ENV_FALLBACK_CACHE_SERVE_STALE_ENABLED)
+            .ok()
+            .as_deref(),
+    )
+}
+
+pub fn fallback_cache_populate_enabled() -> bool {
+    parse_env_flag(
+        std::env::var(ENV_FALLBACK_CACHE_POPULATE_ENABLED)
+            .ok()
+            .as_deref(),
+    )
+}
+
+pub fn media_fallback_cache_serve_stale_enabled() -> bool {
+    parse_env_flag(
+        std::env::var(ENV_MEDIA_FALLBACK_CACHE_SERVE_STALE_ENABLED)
+            .ok()
+            .as_deref(),
+    )
+}
+
+pub fn media_fallback_cache_populate_enabled() -> bool {
+    parse_env_flag(
+        std::env::var(ENV_MEDIA_FALLBACK_CACHE_POPULATE_ENABLED)
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn parse_env_flag(value: Option<&str>) -> bool {
+    value.is_some_and(|value| {
+        matches!(
+            value.to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
+#[derive(Debug, Clone)]
+pub struct GrpcMtlsConfig {
+    pub server_key_path: String,
+    pub server_crt_path: String,
+    pub server_chain_path: Option<String>,
+    pub client_ca_path: String,
+}
+
+impl GrpcMtlsConfig {
+    pub fn from_env() -> anyhow::Result<Option<Self>> {
+        let enabled = parse_env_flag(std::env::var(ENV_GRPC_MTLS_ENABLED).ok().as_deref());
+
+        if !enabled {
+            return Ok(None);
+        }
+
+        let server_key_path = std::env::var(ENV_GRPC_MTLS_SERVER_KEY_PATH)
+            .ok()
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("{ENV_GRPC_MTLS_SERVER_KEY_PATH} must be set"))?;
+
+        let server_crt_path = std::env::var(ENV_GRPC_MTLS_SERVER_CRT_PATH)
+            .ok()
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("{ENV_GRPC_MTLS_SERVER_CRT_PATH} must be set"))?;
+
+        let server_chain_path = std::env::var(ENV_GRPC_MTLS_SERVER_CHAIN_PATH)
+            .ok()
+            .filter(|v| !v.is_empty());
+
+        let client_ca_path = std::env::var(ENV_GRPC_MTLS_CLIENT_CA_PATH)
+            .ok()
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("{ENV_GRPC_MTLS_CLIENT_CA_PATH} must be set"))?;
+
+        Ok(Some(Self {
+            server_key_path,
+            server_crt_path,
+            server_chain_path,
+            client_ca_path,
+        }))
+    }
+
+    pub fn server_tls_config(&self) -> anyhow::Result<tonic::transport::ServerTlsConfig> {
+        let mut cert_pem = std::fs::read(&self.server_crt_path)?;
+        let key_pem = std::fs::read(&self.server_key_path)?;
+        let client_ca_pem = std::fs::read(&self.client_ca_path)?;
+
+        if let Some(chain_path) = self.server_chain_path.as_ref() {
+            let chain_pem = std::fs::read(chain_path)?;
+            if !cert_pem.ends_with(b"\n") {
+                cert_pem.push(b'\n');
+            }
+            cert_pem.extend_from_slice(&chain_pem);
+        }
+
+        let identity = tonic::transport::Identity::from_pem(cert_pem, key_pem);
+        let client_ca = tonic::transport::Certificate::from_pem(client_ca_pem);
+
+        Ok(tonic::transport::ServerTlsConfig::new()
+            .identity(identity)
+            .client_ca_root(client_ca))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_env_flag;
+
+    #[test]
+    fn parses_enabled_environment_values() {
+        for value in ["1", "true", "TRUE", "yes", "on"] {
+            assert!(parse_env_flag(Some(value)), "{value}");
+        }
+    }
+
+    #[test]
+    fn missing_or_disabled_environment_values_are_off() {
+        assert!(!parse_env_flag(None));
+        for value in ["", "0", "false", "FALSE", "no", "off", "other"] {
+            assert!(!parse_env_flag(Some(value)), "{value}");
+        }
+    }
+}

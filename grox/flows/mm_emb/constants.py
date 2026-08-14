@@ -1,0 +1,17 @@
+POST_EMBEDDING_V5_STREAM = "post_embedding_v5_stream"
+POST_EMBEDDING_V5_RECOVERY_STREAM = "post_embedding_v5_recovery_stream"
+POST_EMBEDDING_V5_FOR_REPLY_STREAM = "post_embedding_v5_for_reply_stream"
+POST_EMBEDDING_V8_2_STREAM = "post_embedding_v8_2_stream"
+POST_EMBEDDING_V8_2_RECOVERY_STREAM = "post_embedding_v8_2_recovery_stream"
+POST_EMBEDDING_V8_2_FOR_REPLY_STREAM = "post_embedding_v8_2_for_reply_stream"
+TOPIC_REQUESTS_WITH_SUMMARY = "grox-multimodal-embedding-requests-with-summary"
+TOPIC_V5_RECOVERY = "grox_multimodal_embedding_requests_v5_recovery_v2"
+TOPIC_V8_RECOVERY = "grox_multimodal_embedding_requests_v8_recovery"
+TOPIC_MIN_TRACTION_MULTI_MODAL = (
+    "content-understanding-realtime-unified-posts-min-traction-for-grox-multi-modal"
+)
+TOPIC_EMBEDDING_V5 = "grox-multimodal-embedding-v5"
+TOPIC_EMBEDDING_V5_ALL = "grox-multimodal-embedding-v5-all"
+TOPIC_EMBEDDING_V8_2 = "grox-multimodal-embedding-v8-2"
+RECSYS_V5_EMBED = "recsys-v5-embedding"
+RECSYS_V82_MM_EMBED = "recsys-v82-mm-embedding"

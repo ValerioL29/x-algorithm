@@ -1,0 +1,221 @@
+use std::cell::Cell;
+use std::collections::HashMap;
+use std::time::Instant;
+
+use xai_stats_receiver::{HistogramBuckets, global_stats_receiver};
+
+use crate::models::VfAction;
+use crate::rules::{SafetyLevel, Verdict};
+
+const REQUESTS: &str = "filter_tweets_requests";
+const LATENCY_MS: &str = "filter_tweets_latency_ms";
+const BATCH_SIZE: &str = "filter_tweets_batch_size";
+const VERDICTS: &str = "filter_tweets_verdicts";
+const VERDICTS_BY_RULE: &str = "filter_tweets_verdicts_by_rule";
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct AggregatedVerdicts {
+    pub mix: HashMap<&'static str, u64>,
+    pub by_rule: HashMap<(&'static str, &'static str), u64>,
+}
+
+fn action_label(action: &VfAction) -> &'static str {
+    match action {
+        VfAction::Allow => "allow",
+        VfAction::Drop(_) => "drop",
+        VfAction::Interstitial(_) => "interstitial",
+    }
+}
+
+pub(crate) fn aggregate_verdicts<'a>(
+    verdicts: impl IntoIterator<Item = &'a Verdict>,
+) -> AggregatedVerdicts {
+    let mut out = AggregatedVerdicts::default();
+    for verdict in verdicts {
+        let action = action_label(&verdict.action);
+        *out.mix.entry(action).or_default() += 1;
+        if !matches!(verdict.action, VfAction::Allow)
+            && let Some(rule) = verdict.decided_by
+        {
+            *out.by_rule.entry((rule, action)).or_default() += 1;
+        }
+    }
+    out
+}
+
+pub(crate) fn record_verdicts<'a>(
+    safety_level: SafetyLevel,
+    verdicts: impl IntoIterator<Item = &'a Verdict>,
+) {
+    let aggregated = aggregate_verdicts(verdicts);
+    let level = safety_level.as_str();
+    for (action, count) in &aggregated.mix {
+        incr_nonzero(
+            VERDICTS,
+            &[("action", action), ("safety_level", level)],
+            *count,
+        );
+    }
+    for ((rule, action), count) in &aggregated.by_rule {
+        incr_nonzero(
+            VERDICTS_BY_RULE,
+            &[("rule", rule), ("action", action), ("safety_level", level)],
+            *count,
+        );
+    }
+}
+
+pub(crate) struct RequestMetricsGuard {
+    start: Instant,
+    success: Cell<bool>,
+}
+
+impl RequestMetricsGuard {
+    pub(crate) fn new() -> Self {
+        incr(REQUESTS, &[("outcome", "started")], 1);
+        Self {
+            start: Instant::now(),
+            success: Cell::new(false),
+        }
+    }
+
+    pub(crate) fn mark_success(&self) {
+        self.success.set(true);
+    }
+}
+
+impl Drop for RequestMetricsGuard {
+    fn drop(&mut self) {
+        let outcome = if self.success.get() {
+            "success"
+        } else {
+            "cancelled"
+        };
+        incr(REQUESTS, &[("outcome", outcome)], 1);
+        observe_vm(LATENCY_MS, &[], self.start.elapsed().as_secs_f64() * 1000.0);
+    }
+}
+
+pub(crate) fn record_batch_size(size: usize) {
+    observe(
+        BATCH_SIZE,
+        &[],
+        size as f64,
+        HistogramBuckets::Bucket50To500,
+    );
+}
+
+fn incr_nonzero(metric: &str, labels: &[(&str, &str)], count: u64) {
+    if count > 0 {
+        incr(metric, labels, count);
+    }
+}
+
+fn incr(metric: &str, labels: &[(&str, &str)], count: u64) {
+    if let Some(sr) = global_stats_receiver() {
+        sr.incr(metric, labels, count);
+    }
+}
+
+fn observe(metric: &str, labels: &[(&str, &str)], value: f64, buckets: HistogramBuckets) {
+    if let Some(sr) = global_stats_receiver() {
+        sr.observe(metric, labels, value, buckets);
+    }
+}
+
+fn observe_vm(metric: &str, labels: &[(&str, &str)], value: f64) {
+    if let Some(sr) = global_stats_receiver() {
+        sr.observe_vm(metric, labels, value);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use xai_visibility_filtering::models::FilteredReason;
+
+    fn allow() -> Verdict {
+        Verdict {
+            action: VfAction::Allow,
+            decided_by: None,
+        }
+    }
+
+    fn drop_by(rule: &'static str) -> Verdict {
+        Verdict {
+            action: VfAction::Drop(FilteredReason::UnspecifiedReason),
+            decided_by: Some(rule),
+        }
+    }
+
+    fn interstitial_by(rule: &'static str) -> Verdict {
+        Verdict {
+            action: VfAction::Interstitial(FilteredReason::ContainNsfwMedia),
+            decided_by: Some(rule),
+        }
+    }
+
+    #[test]
+    fn allows_only_on_mix_metric() {
+        let a = allow();
+        let b = allow();
+        let d = drop_by("suspended_author");
+        let aggregated = aggregate_verdicts([&a, &b, &d]);
+
+        assert_eq!(aggregated.mix.get("allow"), Some(&2));
+        assert_eq!(aggregated.mix.get("drop"), Some(&1));
+        assert!(!aggregated.mix.contains_key("interstitial"));
+        assert_eq!(aggregated.by_rule.len(), 1);
+        assert_eq!(
+            aggregated.by_rule.get(&("suspended_author", "drop")),
+            Some(&1)
+        );
+    }
+
+    #[test]
+    fn unresolved_author_verdict_counts_on_by_rule() {
+        let d = Verdict::unresolved_author();
+        let a = allow();
+        let aggregated = aggregate_verdicts([&d, &a]);
+
+        assert_eq!(aggregated.mix.get("drop"), Some(&1));
+        assert_eq!(aggregated.mix.get("allow"), Some(&1));
+        assert_eq!(
+            aggregated.by_rule.get(&("unresolved_author_id", "drop")),
+            Some(&1)
+        );
+    }
+
+    #[test]
+    fn drop_vs_interstitial_bucket_separately() {
+        let d = drop_by("nsfw_media");
+        let i1 = interstitial_by("nsfw_media");
+        let i2 = interstitial_by("nsfw_author");
+        let aggregated = aggregate_verdicts([&d, &i1, &i2]);
+
+        assert_eq!(aggregated.mix.get("drop"), Some(&1));
+        assert_eq!(aggregated.mix.get("interstitial"), Some(&2));
+        assert!(!aggregated.mix.contains_key("allow"));
+        assert_eq!(aggregated.by_rule.get(&("nsfw_media", "drop")), Some(&1));
+        assert_eq!(
+            aggregated.by_rule.get(&("nsfw_media", "interstitial")),
+            Some(&1)
+        );
+        assert_eq!(
+            aggregated.by_rule.get(&("nsfw_author", "interstitial")),
+            Some(&1)
+        );
+    }
+
+    #[test]
+    fn non_allow_without_decided_by_skips_by_rule() {
+        let v = Verdict {
+            action: VfAction::Drop(FilteredReason::UnspecifiedReason),
+            decided_by: None,
+        };
+        let aggregated = aggregate_verdicts([&v]);
+
+        assert_eq!(aggregated.mix.get("drop"), Some(&1));
+        assert!(aggregated.by_rule.is_empty());
+    }
+}

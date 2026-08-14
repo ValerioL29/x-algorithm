@@ -1,0 +1,21 @@
+import <content_understanding/sharedConfig>
+
+StreamForwarder({
+  source = KafkaTopic({
+    topic = "content_understanding_realtime_unified_posts",
+    dest = "/s/kafka/main-2:kafka-tls",
+    consumerGroupId = "post_creation_event",
+    develConsumerGroupId = None,
+    mapping = ValueOnly({
+      value = Type(com.twitter.strato.columns.content_understanding.content_understanding.ContentUnderstandingMetadataV2),
+      encoding = ThriftEncoding
+    })
+  }),
+  forwardToOp = Execute,
+  forwardEventsFrom = AllZones,
+  forwardToColumn = #<hydra/phoenix_rank_all/postCreationEventProcessor>,
+  delay = 2.minutes,
+  slo = { maxLag = 120.minutes },
+  contactInfo = Some(sharedConfig.contactInfo),
+  lifecycle = Development
+})
