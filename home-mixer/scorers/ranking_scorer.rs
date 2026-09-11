@@ -1,4 +1,4 @@
-use crate::models::candidate::{MpnParts, PhoenixScores, PostCandidate, SlateContext};
+use crate::models::candidate::{PhoenixScores, PostCandidate, SlateContext};
 use crate::models::query::ScoredPostsQuery;
 use crate::params::*;
 use crate::scorers::author_cold_start::AuthorColdStart;
@@ -102,32 +102,7 @@ impl ScoringWeights {
         let bidirectional_follow_dwell_weight_boost =
             params.get(BidirectionalFollowDwellWeightBoost);
 
-        let positive_sum = favorite
-            + reply
-            + retweet
-            + photo_expand
-            + video_open
-            + click
-            + open_link
-            + profile_click
-            + vqv
-            + share
-            + share_via_dm
-            + share_via_copy_link
-            + dwell
-            + quote
-            + quoted_click
-            + quoted_vqv
-            + follow_author
-            + if enable_multiplicative_post_unexplored {
-                0.0
-            } else {
-                post_unexplored
-            };
-        let negative_sum = -(not_interested + block_author + mute_author + report + not_dwelled);
-        let total_sum = positive_sum + negative_sum;
-
-        Self {
+        let mut weights = Self {
             favorite,
             reply,
             retweet,
@@ -162,13 +137,102 @@ impl ScoringWeights {
             mute_author,
             report,
             not_dwelled,
-            negative_sum,
-            total_sum,
+            negative_sum: 0.0,
+            total_sum: 0.0,
             min_video_duration_ms,
             enable_quoted_vqv_duration_check,
             bidirectional_follow_reply_weight_boost,
             bidirectional_follow_dwell_weight_boost,
+        };
+        weights.recompute_sums();
+        weights
+    }
+
+    fn recompute_sums(&mut self) {
+        let positive_sum = self.favorite
+            + self.reply
+            + self.retweet
+            + self.photo_expand
+            + self.video_open
+            + self.click
+            + self.open_link
+            + self.profile_click
+            + self.vqv
+            + self.share
+            + self.share_via_dm
+            + self.share_via_copy_link
+            + self.dwell
+            + self.quote
+            + self.quoted_click
+            + self.quoted_vqv
+            + self.follow_author
+            + if self.enable_multiplicative_post_unexplored {
+                0.0
+            } else {
+                self.post_unexplored
+            };
+        self.negative_sum = -(self.not_interested
+            + self.block_author
+            + self.mute_author
+            + self.report
+            + self.not_dwelled);
+        self.total_sum = positive_sum + self.negative_sum;
+    }
+
+    pub(crate) fn perturbed(mut self, query: &ScoredPostsQuery) -> Self {
+        let sigma = query.params.get(WeightPerturbationSigma);
+        if sigma <= 0.0 {
+            return self;
         }
+        let salt = query.params.get(WeightPerturbationSalt);
+        for (head, weight) in self.weights_mut() {
+            *weight *= (sigma * perturbation_sign(&salt, query.user_id, head)).exp();
+        }
+        self.recompute_sums();
+        self
+    }
+
+    fn weights_mut(&mut self) -> [(&'static str, &mut f64); 26] {
+        [
+            ("favorite", &mut self.favorite),
+            ("reply", &mut self.reply),
+            ("retweet", &mut self.retweet),
+            ("photo_expand", &mut self.photo_expand),
+            ("video_open", &mut self.video_open),
+            ("click", &mut self.click),
+            ("open_link", &mut self.open_link),
+            ("profile_click", &mut self.profile_click),
+            ("vqv", &mut self.vqv),
+            ("share", &mut self.share),
+            ("share_via_dm", &mut self.share_via_dm),
+            ("share_via_copy_link", &mut self.share_via_copy_link),
+            ("dwell", &mut self.dwell),
+            ("quote", &mut self.quote),
+            ("quoted_click", &mut self.quoted_click),
+            ("quoted_vqv", &mut self.quoted_vqv),
+            ("dwell_time", &mut self.cont_dwell_time),
+            ("click_dwell_time", &mut self.cont_click_dwell_time),
+            (
+                "active_secs_5m_residual_norm",
+                &mut self.cont_active_secs_5m_residual_norm,
+            ),
+            ("follow_author", &mut self.follow_author),
+            ("post_unexplored", &mut self.post_unexplored),
+            ("not_interested", &mut self.not_interested),
+            ("block_author", &mut self.block_author),
+            ("mute_author", &mut self.mute_author),
+            ("report", &mut self.report),
+            ("not_dwelled", &mut self.not_dwelled),
+        ]
+    }
+}
+
+pub(crate) fn perturbation_sign(salt: &str, user_id: u64, head: &str) -> f64 {
+    let digest = md5::compute(format!("{salt}:{user_id}:{head}"));
+    if digest[0] & 1 == 1 {
+        1.0
+    } else {
+        -1.0
     }
 }
 
@@ -219,88 +283,6 @@ impl ScoringWeights {
             return self.dwell + self.bidirectional_follow_dwell_weight_boost;
         }
         self.dwell
-    }
-
-    pub(crate) fn effective_head_weights(
-        &self,
-        query: &ScoredPostsQuery,
-        candidate: &PostCandidate,
-    ) -> xai_vm_ranker_proto::HeadWeights {
-        let scores = &candidate.phoenix_scores;
-        let vqv = crate::util::candidates_util::vqv_weight(
-            query,
-            candidate,
-            self.min_video_duration_ms,
-            self.vqv,
-        );
-        let dwell_time = match scores.post_unexplored_score {
-            Some(post_unexplored)
-                if self.enable_multiplicative_post_unexplored
-                    && self.post_unexplored_active_for(candidate) =>
-            {
-                self.cont_dwell_time
-                    * (1.0 + post_unexplored * self.multiplicative_post_unexplored_alpha)
-            }
-            _ => self.cont_dwell_time,
-        };
-        let click_dwell_time = if self.enable_click_dwell_low_fav_rate_penalty {
-            match (scores.click_dwell_time, scores.favorite_score) {
-                (Some(_), Some(fav)) => {
-                    let baseline = self
-                        .click_dwell_low_fav_rate_penalty_baseline
-                        .max(f64::EPSILON);
-                    let multiplier = (fav / baseline)
-                        .powf(self.click_dwell_low_fav_rate_penalty_alpha)
-                        .max(self.click_dwell_low_fav_rate_penalty_floor)
-                        .min(self.click_dwell_low_fav_rate_penalty_cap);
-                    self.cont_click_dwell_time * multiplier
-                }
-                _ => self.cont_click_dwell_time,
-            }
-        } else {
-            self.cont_click_dwell_time
-        };
-        let quoted_vqv = crate::util::candidates_util::quoted_vqv_weight(
-            candidate,
-            self.min_video_duration_ms,
-            self.quoted_vqv,
-            self.enable_quoted_vqv_duration_check,
-        );
-        let post_unexplored = if !self.enable_multiplicative_post_unexplored
-            && self.post_unexplored_active_for(candidate)
-        {
-            self.post_unexplored
-        } else {
-            0.0
-        };
-        xai_vm_ranker_proto::HeadWeights {
-            favorite: Some(self.favorite),
-            reply: Some(self.reply_weight_for(candidate)),
-            retweet: Some(self.retweet),
-            photo_expand: Some(self.photo_expand),
-            click: Some(self.click),
-            profile_click: Some(self.profile_click),
-            vqv: Some(vqv),
-            share: Some(self.share),
-            share_via_dm: Some(self.share_via_dm),
-            share_via_copy_link: Some(self.share_via_copy_link),
-            dwell: Some(self.dwell_weight_for(candidate)),
-            quote: Some(self.quote),
-            quoted_click: Some(self.quoted_click),
-            follow_author: Some(self.follow_author),
-            not_interested: Some(self.not_interested),
-            block_author: Some(self.block_author),
-            mute_author: Some(self.mute_author),
-            report: Some(self.report),
-            dwell_time: Some(dwell_time),
-            click_dwell_time: Some(click_dwell_time),
-            not_dwelled: Some(self.not_dwelled),
-            video_open: Some(self.video_open),
-            open_link: Some(self.open_link),
-            quoted_vqv: Some(quoted_vqv),
-            post_unexplored: Some(post_unexplored),
-            active_secs_5m_residual_norm: Some(self.cont_active_secs_5m_residual_norm),
-        }
     }
 
     pub(crate) fn applied_weights_map(&self) -> HashMap<String, f64> {
@@ -415,6 +397,35 @@ pub struct RankingScorer {
 }
 
 impl RankingScorer {
+    // These weights reflect a combination of how much an action is
+    // valued in ranking and typical propensities of these actions
+    // across the X network (e.g. negative feedback is overall rare).
+
+    // Each weight multiplies the *predicted* probability of that
+    // action (P(favorite), P(repost), …) or a continuous value e.g.
+    // watch time -- the weights do not multiply raw engagement counts.
+    // One common misinterpretation is that you can read these weight
+    // ratios as count equivalences, e.g. the incorrect statement that
+    // "one report cancels 468 likes" -- this is incorrect because the
+    // weights apply to the predicted probabilities rather than raw counts.
+
+    // And the baseline probability of a Report is more than 1000x lower
+    // than a Like, so it’s weighted more to allow the prediction to affect
+    // the final ranking at all.
+
+    // Related to the above is a misunderstanding that bad actors engaging
+    // in mass blocking/reporting will significantly suppress reach. There
+    // are multiple things inhibiting this:
+    // 1. It’s predicting your likelihood of the action, not summing up
+    // raw weights on counts. Also, recommendations are personalized, so
+    // reports from bad actors will primarily affect recommendations for
+    // users who are similar to the bad actors, rather than having the same
+    // effect on the post's ranking to everyone.
+    // 2. For an account to count in the algorithms recommendation system,
+    // it must take place on a post served in Home Timeline. Directly
+    // navigating to a post (i.e., coordinating via groupchat) has no
+    // ranking impact. And users cannot manufacture a post to show up in
+    // their Timeline in any consistently reproducible way.
     fn apply(score: Option<f64>, weight: f64) -> f64 {
         score.unwrap_or(0.0) * weight
     }
@@ -615,10 +626,7 @@ impl RankingScorer {
         (1.0 - floor) * decay_factor.powf(exponent) + floor
     }
 
-    fn compute_slate_contexts(
-        candidates: &[PostCandidate],
-        pre_diversity_scores: &[f64],
-    ) -> Vec<SlateContext> {
+    fn author_pool_counts(candidates: &[PostCandidate], pre_diversity_scores: &[f64]) -> Vec<u32> {
         let mut indexed: Vec<(usize, f64)> = pre_diversity_scores
             .iter()
             .enumerate()
@@ -626,51 +634,42 @@ impl RankingScorer {
             .collect();
         indexed.sort_by(|(_, a), (_, b)| b.partial_cmp(a).unwrap_or(Ordering::Equal));
 
-        let mut contexts = vec![SlateContext::default(); candidates.len()];
+        let mut counts = vec![0u32; candidates.len()];
         let mut author_counts: FxHashMap<u64, u32> = FxHashMap::default();
-        let mut last_author_rank: FxHashMap<u64, u32> = FxHashMap::default();
-        for (rank, (idx, score)) in indexed.into_iter().enumerate() {
-            let rank = rank as u32;
+        for (idx, _) in indexed {
             let author_id = candidates[idx].author_id;
             let k = author_counts.get(&author_id).copied().unwrap_or(0);
-            let rank_gap = last_author_rank.get(&author_id).map(|last| rank - last);
-            contexts[idx] = SlateContext {
-                k,
-                pool_rank: rank,
-                pool_rank_gap: rank_gap,
-                fatigue: 0.0,
-                pre_diversity_score: score,
-            };
+            counts[idx] = k;
             author_counts.insert(author_id, k + 1);
-            last_author_rank.insert(author_id, rank);
         }
+        counts
+    }
 
-        contexts
+    fn served_slate_contexts(candidates: &[PostCandidate]) -> Option<Vec<SlateContext>> {
+        candidates.iter().map(|c| c.served_slate_context).collect()
     }
 
     fn stored_slate_contexts(candidates: &[PostCandidate]) -> Option<Vec<SlateContext>> {
         candidates.iter().map(|c| c.slate_context).collect()
     }
 
-    fn author_diversity_multipliers(
-        query: &ScoredPostsQuery,
-        contexts: &[SlateContext],
-    ) -> Vec<f64> {
+    fn author_diversity_multipliers(query: &ScoredPostsQuery, counts: &[u32]) -> Vec<f64> {
         let decay_factor = query.params.get(AuthorDiversityDecay);
         let floor = query.params.get(AuthorDiversityFloor);
 
-        contexts
+        counts
             .iter()
-            .map(|context| Self::diversity_multiplier(decay_factor, floor, f64::from(context.k)))
+            .map(|&k| Self::diversity_multiplier(decay_factor, floor, f64::from(k)))
             .collect()
     }
 
     fn apply_author_diversity(
         query: &ScoredPostsQuery,
-        contexts: &[SlateContext],
+        candidates: &[PostCandidate],
         pre_diversity_scores: &[f64],
     ) -> Vec<f64> {
-        let multipliers = Self::author_diversity_multipliers(query, contexts);
+        let counts = Self::author_pool_counts(candidates, pre_diversity_scores);
+        let multipliers = Self::author_diversity_multipliers(query, &counts);
         pre_diversity_scores
             .iter()
             .zip(multipliers)
@@ -711,7 +710,7 @@ impl Scorer<ScoredPostsQuery, PostCandidate> for RankingScorer {
         query: &ScoredPostsQuery,
         candidates: &[PostCandidate],
     ) -> Vec<Result<PostCandidate, String>> {
-        let weights = ScoringWeights::from_params(&query.params);
+        let weights = ScoringWeights::from_params(&query.params).perturbed(query);
         let enable_author_diversity = query.params.get(EnableAuthorDiversity);
 
         let use_dwell_regret = match query.params.get(ValueModelMode).as_str() {
@@ -738,8 +737,6 @@ impl Scorer<ScoredPostsQuery, PostCandidate> for RankingScorer {
                 .collect()
         };
 
-        let mpn_scoring = query.params.get(EnableMpnScoring) && !use_dwell_regret;
-
         let effective_oon = Self::effective_oon_weight(query);
         let deboost_in_network_replies_retweets = query
             .params
@@ -753,52 +750,35 @@ impl Scorer<ScoredPostsQuery, PostCandidate> for RankingScorer {
             None => false,
         };
 
-        if mpn_scoring {
-            let persisted_contexts: Option<Vec<SlateContext>> = if query.has_cached_posts {
-                Self::stored_slate_contexts(candidates)
-            } else {
-                Some(Self::compute_slate_contexts(candidates, &weighted_scores))
-            };
+        let persisted_contexts: Option<Vec<SlateContext>> = Self::served_slate_contexts(candidates)
+            .or_else(|| {
+                query
+                    .has_cached_posts
+                    .then(|| Self::stored_slate_contexts(candidates))
+                    .flatten()
+            });
 
+        if !use_dwell_regret && query.params.get(MultiplierPreOffset) {
             let diversity_multipliers: Vec<f64> = if enable_author_diversity {
-                let recomputed_contexts;
-                let scoring_contexts: &[SlateContext] = match &persisted_contexts {
-                    Some(contexts) if !query.has_cached_posts => contexts,
-                    _ => {
-                        recomputed_contexts =
-                            Self::compute_slate_contexts(candidates, &weighted_scores);
-                        &recomputed_contexts
-                    }
-                };
-                Self::author_diversity_multipliers(query, scoring_contexts)
+                let counts = Self::author_pool_counts(candidates, &weighted_scores);
+                Self::author_diversity_multipliers(query, &counts)
             } else {
                 vec![1.0; candidates.len()]
             };
-
-            let scalar_multipliers: Vec<f64> = candidates
+            let scores: Vec<f64> = weighted_parts
                 .iter()
                 .enumerate()
-                .map(|(i, c)| {
+                .map(|(i, &(pos, neg))| {
                     let mut m = diversity_multipliers[i];
-                    if oon_applies(c) {
+                    if oon_applies(&candidates[i]) {
                         m *= effective_oon;
                     }
-                    m
-                })
-                .collect();
-
-            let mpn_scores: Vec<f64> = weighted_parts
-                .iter()
-                .zip(&scalar_multipliers)
-                .map(|(&(pos, neg), &m)| {
                     let net = pos - neg;
                     let scaled = if net >= 0.0 { m * net } else { net };
                     Self::offset_score(scaled, &weights)
                 })
                 .collect();
-
-            let final_scores = self.author_cold_start.apply(query, candidates, &mpn_scores);
-
+            let final_scores = self.author_cold_start.apply(query, candidates, &scores);
             return weighted_scores
                 .iter()
                 .zip(final_scores)
@@ -808,11 +788,6 @@ impl Scorer<ScoredPostsQuery, PostCandidate> for RankingScorer {
                         weighted_score: Some(weighted),
                         score: Some(score),
                         slate_context: persisted_contexts.as_ref().map(|contexts| contexts[i]),
-                        mpn_parts: Some(MpnParts {
-                            pos: weighted_parts[i].0,
-                            neg: weighted_parts[i].1,
-                            scalar_multiplier: scalar_multipliers[i],
-                        }),
                         ..Default::default()
                     })
                 })
@@ -823,23 +798,8 @@ impl Scorer<ScoredPostsQuery, PostCandidate> for RankingScorer {
             .author_cold_start
             .apply(query, candidates, &weighted_scores);
 
-        let persisted_contexts: Option<Vec<SlateContext>> = if query.has_cached_posts {
-            Self::stored_slate_contexts(candidates)
-        } else {
-            Some(Self::compute_slate_contexts(candidates, &adjusted_scores))
-        };
-
         let diversity_adjusted = if enable_author_diversity {
-            let recomputed_contexts;
-            let scoring_contexts: &[SlateContext] = match &persisted_contexts {
-                Some(contexts) if !query.has_cached_posts => contexts,
-                _ => {
-                    recomputed_contexts =
-                        Self::compute_slate_contexts(candidates, &adjusted_scores);
-                    &recomputed_contexts
-                }
-            };
-            Self::apply_author_diversity(query, scoring_contexts, &adjusted_scores)
+            Self::apply_author_diversity(query, candidates, &adjusted_scores)
         } else {
             adjusted_scores.clone()
         };
@@ -876,7 +836,6 @@ impl Scorer<ScoredPostsQuery, PostCandidate> for RankingScorer {
         candidate.weighted_score = scored.weighted_score;
         candidate.score = scored.score;
         candidate.slate_context = scored.slate_context;
-        candidate.mpn_parts = scored.mpn_parts;
     }
 }
 
@@ -949,7 +908,6 @@ mod tests {
             ("rust_home_mixer_author_diversity_decay", "0.5"),
             ("rust_home_mixer_author_diversity_floor", "0.25"),
             ("rust_home_mixer_value_model_mode", "weighted"),
-            ("rust_home_mixer_enable_mpn_scoring", "false"),
         ]);
         let scored = scorer.score(&query, &candidates).await;
 
@@ -974,6 +932,7 @@ mod tests {
             pool_rank_gap: Some(3),
             fatigue: 0.0,
             pre_diversity_score: 0.5,
+            ..Default::default()
         };
         let stored_repeat = PostCandidate {
             slate_context: Some(stored_context),
@@ -1013,7 +972,6 @@ mod tests {
             ("rust_home_mixer_author_diversity_decay", "0.5"),
             ("rust_home_mixer_author_diversity_floor", "0.25"),
             ("rust_home_mixer_value_model_mode", "weighted"),
-            ("rust_home_mixer_enable_mpn_scoring", "false"),
         ]);
         query.has_cached_posts = true;
 
@@ -1034,7 +992,6 @@ mod tests {
         let query = query_with_flags(&[
             ("rust_home_mixer_oon_weight_factor", "0.75"),
             ("rust_home_mixer_value_model_mode", "weighted"),
-            ("rust_home_mixer_enable_mpn_scoring", "false"),
         ]);
         let scored = scorer.score(&query, &candidates).await;
 
@@ -1348,7 +1305,6 @@ mod tests {
             ),
             ("rust_home_mixer_oon_weight_factor", "0.75"),
             ("rust_home_mixer_value_model_mode", "weighted"),
-            ("rust_home_mixer_enable_mpn_scoring", "false"),
         ]);
 
         let scored = scorer.score(&query, &candidates).await;
