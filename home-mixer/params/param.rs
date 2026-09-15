@@ -1,4 +1,4 @@
-// mirrored from config feature-switch defaults; last sync 2026-09-10T16:21:03Z
+// mirrored from config feature-switch defaults; last sync 2026-09-14T16:22:15Z
 use xai_feature_switches::param;
 
 param!(
@@ -98,6 +98,12 @@ param!(
     EnablePhoenixScoreStatsExperimentBucket,
     bool,
     "rust_home_mixer_enable_phoenix_score_stats_experiment_bucket",
+    false
+);
+param!(
+    EnableResponseDiversityStatsExperimentBucket,
+    bool,
+    "rust_home_mixer_enable_response_diversity_stats_experiment_bucket",
     false
 );
 param!(

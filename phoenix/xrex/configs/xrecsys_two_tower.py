@@ -330,7 +330,7 @@ def _xrecsys_two_tower_combined_base() -> dict:
 _H100_OVERRIDES = {
     "bs_per_device": 480,
     "ep": 128,
-    "attn_impl": "pallas_ranker_varlen_attn",
+    "attn_impl": "cutedsl_ranker_varlen_attn",
 }
 
 _GB300_OVERRIDES = {"bs_per_device": 960, "ep": 64, "attn_impl": "cutedsl_ranker_varlen_attn"}

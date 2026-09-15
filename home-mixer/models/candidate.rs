@@ -180,6 +180,7 @@ pub trait CandidateHelpers {
     fn get_screen_names(&self) -> HashMap<u64, String>;
     fn get_original_tweet_id(&self) -> u64;
     fn get_original_author_id(&self) -> u64;
+    fn semantic_id_prefix(&self, levels: usize) -> Option<&[i32]>;
     fn as_tweet_info(&self, is_followed_by_viewer: bool) -> xai_recsys_proto::TweetInfo;
     fn as_score_info_no_prediction_scores(&self) -> xai_recsys_proto::ScoreInfo;
 }
@@ -204,6 +205,13 @@ impl CandidateHelpers for PostCandidate {
 
     fn get_original_author_id(&self) -> u64 {
         self.retweeted_user_id.unwrap_or(self.author_id)
+    }
+
+    fn semantic_id_prefix(&self, levels: usize) -> Option<&[i32]> {
+        self.semantic_ids
+            .as_deref()
+            .filter(|codes| codes.len() >= levels && levels > 0)
+            .map(|codes| &codes[..levels])
     }
 
     fn as_score_info_no_prediction_scores(&self) -> xai_recsys_proto::ScoreInfo {

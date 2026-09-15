@@ -873,24 +873,35 @@ mod tests {
         let local = tes_spec("DropLocalLawsTakendownPostRule");
         let reason = FilteredReason::UnspecifiedReason;
 
-        for code in ["xx", "xy", "XX"] {
+        for code in ["xx", "XX"] {
             let worldwide = takedown_candidate(vec![TakedownReason::LegalRequest {
                 country_code: code.to_string(),
             }]);
             assert_drops(legal, &viewer_with_country("us"), &worldwide, &reason);
             assert_drops(legal, &viewer(VIEWER_ID), &worldwide, &reason);
         }
+        for code in ["xx", "xy"] {
+            let unspecified = takedown_candidate(vec![TakedownReason::UnspecifiedReason {
+                country_code: code.to_string(),
+            }]);
+            assert_drops(legal, &viewer_with_country("us"), &unspecified, &reason);
+            assert_drops(legal, &viewer(VIEWER_ID), &unspecified, &reason);
+        }
 
-        let bystander_worldwide = takedown_candidate(vec![TakedownReason::BystanderReport {
-            country_code: "xx".to_string(),
-        }]);
-        assert_drops(
-            local,
-            &viewer_with_country("us"),
-            &bystander_worldwide,
-            &reason,
-        );
-        assert_drops(local, &viewer(VIEWER_ID), &bystander_worldwide, &reason);
+        for code in ["xy", "XY"] {
+            let legal_copyright = takedown_candidate(vec![TakedownReason::LegalRequest {
+                country_code: code.to_string(),
+            }]);
+            assert_allows(legal, &viewer_with_country("us"), &legal_copyright);
+            assert_allows(legal, &viewer(VIEWER_ID), &legal_copyright);
+        }
+        for code in ["xx", "XY"] {
+            let bystander_worldwide = takedown_candidate(vec![TakedownReason::BystanderReport {
+                country_code: code.to_string(),
+            }]);
+            assert_allows(local, &viewer_with_country("us"), &bystander_worldwide);
+            assert_allows(local, &viewer(VIEWER_ID), &bystander_worldwide);
+        }
 
         let country_scoped = takedown_candidate(vec![TakedownReason::LegalRequest {
             country_code: "de".to_string(),

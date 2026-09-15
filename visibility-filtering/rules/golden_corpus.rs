@@ -563,14 +563,44 @@ fn tweet_shape_cases() -> Vec<Case> {
             expected_decided_by: Some("DropLegalTakendownPostRule"),
         },
         Case {
-            name: "local_laws_takedown_worldwide_drops_for_any_viewer",
+            name: "legal_takedown_copyright_code_allows_without_viewer_country",
+            level: TimelineHome,
+            viewer: viewer(VIEWER_ID),
+            candidate: takedown_candidate(TakedownReason::LegalRequest {
+                country_code: "xy".to_string(),
+            }),
+            expected_action: Allow,
+            expected_decided_by: None,
+        },
+        Case {
+            name: "unspecified_takedown_worldwide_drops_without_viewer_country",
+            level: TimelineHome,
+            viewer: viewer(VIEWER_ID),
+            candidate: takedown_candidate(TakedownReason::UnspecifiedReason {
+                country_code: "xx".to_string(),
+            }),
+            expected_action: Drop(FilteredReason::UnspecifiedReason),
+            expected_decided_by: Some("DropLegalTakendownPostRule"),
+        },
+        Case {
+            name: "unspecified_takedown_copyright_code_drops_without_viewer_country",
+            level: TimelineHome,
+            viewer: viewer(VIEWER_ID),
+            candidate: takedown_candidate(TakedownReason::UnspecifiedReason {
+                country_code: "xy".to_string(),
+            }),
+            expected_action: Drop(FilteredReason::UnspecifiedReason),
+            expected_decided_by: Some("DropLegalTakendownPostRule"),
+        },
+        Case {
+            name: "local_laws_takedown_worldwide_allows_any_viewer",
             level: TimelineHome,
             viewer: viewer_in_country("us"),
             candidate: takedown_candidate(TakedownReason::BystanderReport {
                 country_code: "xx".to_string(),
             }),
-            expected_action: Drop(FilteredReason::UnspecifiedReason),
-            expected_decided_by: Some("DropLocalLawsTakendownPostRule"),
+            expected_action: Allow,
+            expected_decided_by: None,
         },
         Case {
             name: "dmca_takedown_drops_for_any_viewer",

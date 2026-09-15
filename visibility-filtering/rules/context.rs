@@ -266,9 +266,7 @@ impl TakedownPredicates<'_> {
             .iter()
             .filter_map(extractor)
             .any(|c| {
-                c.eq_ignore_ascii_case(WORLDWIDE_COUNTRY_CODE)
-                    || c.eq_ignore_ascii_case(WORLDWIDE_COPYRIGHT_COUNTRY_CODE)
-                    || viewer_country.is_some_and(|v| c.eq_ignore_ascii_case(v))
+                is_worldwide_code(c) || viewer_country.is_some_and(|v| c.eq_ignore_ascii_case(v))
             })
     }
 
@@ -290,8 +288,18 @@ impl TakedownPredicates<'_> {
 const WORLDWIDE_COUNTRY_CODE: &str = "xx";
 const WORLDWIDE_COPYRIGHT_COUNTRY_CODE: &str = "xy";
 
+fn is_worldwide_code(country_code: &str) -> bool {
+    country_code.eq_ignore_ascii_case(WORLDWIDE_COUNTRY_CODE)
+        || country_code.eq_ignore_ascii_case(WORLDWIDE_COPYRIGHT_COUNTRY_CODE)
+}
+
 fn legal_takedown_country(reason: &TakedownReason) -> Option<&str> {
     match reason {
+        TakedownReason::LegalRequest { country_code }
+            if country_code.eq_ignore_ascii_case(WORLDWIDE_COPYRIGHT_COUNTRY_CODE) =>
+        {
+            None
+        }
         TakedownReason::LegalRequest { country_code }
         | TakedownReason::UnspecifiedReason { country_code } => Some(country_code),
         TakedownReason::Dmca => Some(WORLDWIDE_COPYRIGHT_COUNTRY_CODE),
@@ -301,7 +309,9 @@ fn legal_takedown_country(reason: &TakedownReason) -> Option<&str> {
 
 fn local_laws_takedown_country(reason: &TakedownReason) -> Option<&str> {
     match reason {
-        TakedownReason::BystanderReport { country_code } => Some(country_code),
+        TakedownReason::BystanderReport { country_code } if !is_worldwide_code(country_code) => {
+            Some(country_code)
+        }
         _ => None,
     }
 }

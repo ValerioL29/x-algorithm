@@ -160,7 +160,7 @@ impl StratoVfClient {
             ca_cert_path,
             client_cert_path,
             client_key_path,
-            num_endpoints: Some(12),
+            aperture_size: Some(12),
             connect_timeout_ms: 400,
             request_timeout_ms: 990,
             client_id: Some(client_id),

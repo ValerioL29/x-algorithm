@@ -2,6 +2,7 @@ import <strato/featureswitches>
 
 val userRoles = Set(
   "birdwatch_team",
+  "employee",
 )
 
 val fs = featureswitches.build({
@@ -14,9 +15,13 @@ val fs = featureswitches.build({
 val underTheHoodReportEnabled =
   fs.booleanParam("under_the_hood_report_enabled", false)
 
+val underTheHoodReportMaxMonthBucket =
+  fs.intParam("under_the_hood_report_max_month_bucket", 0)
+
 Library({
   export = {
     underTheHoodReportEnabled = underTheHoodReportEnabled,
+    underTheHoodReportMaxMonthBucket = underTheHoodReportMaxMonthBucket,
   },
   description = PlainText("Feature switch params for Under the Hood"),
   contactInfo = <visibility/under-the-hood/sharedConfig>.contactInfo,

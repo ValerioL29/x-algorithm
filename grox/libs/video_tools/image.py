@@ -174,6 +174,9 @@ _MOTION_REVEAL_ECC_CRITERIA = (
 _MOTION_REVEAL_ECC_MAX_DIM = 320
 _MOTION_REVEAL_STATIC_SHIFT_PX = 0.3
 _MOTION_REVEAL_STATIC_MIN_RESPONSE = 0.05
+_MOTION_REVEAL_MIN_COVER_GRADIENT = 5.0
+_MOTION_REVEAL_MAX_WARP_TRANSLATION = 0.15
+_MOTION_REVEAL_MAX_WARP_LINEAR = 0.15
 _MOTION_REVEAL_PREGATE_P99 = (2.0, 130.0)
 _MOTION_REVEAL_SKIN_LAB_AB = (143.0, 148.0)
 _MOTION_REVEAL_SKIN_AXIS_MAX_DISTANCE = 12.0
@@ -200,6 +203,13 @@ def _temporal_median(stack_u8: np.ndarray) -> np.ndarray:
     lower, upper = (n - 1) // 2, n // 2
     part = np.partition(stack_u8, [lower, upper], axis=0)
     return (part[lower].astype(np.float32) + part[upper].astype(np.float32)) * 0.5
+
+
+def _cover_gradient(gray_u8: np.ndarray) -> float:
+    g = gray_u8.astype(np.float32)
+    return float(
+        np.hypot(cv2.Sobel(g, cv2.CV_32F, 1, 0), cv2.Sobel(g, cv2.CV_32F, 0, 1)).mean()
+    )
 
 
 def _residual_magnitude(stack: np.ndarray, median: np.ndarray) -> np.ndarray:
@@ -260,21 +270,28 @@ def _ecc_downscale(gray: np.ndarray, scale: float) -> np.ndarray:
 
 def _ecc_align(
     reference_small: np.ndarray, small: np.ndarray, mode: int, scale: float = 1.0
-) -> tuple[np.ndarray | None, float]:
-    reference_gray, gray = reference_small, small
+) -> np.ndarray | None:
     warp = np.eye(2, 3, dtype=np.float32)
     try:
         cc, warp = cv2.findTransformECC(
-            reference_gray, gray, warp, mode, _MOTION_REVEAL_ECC_CRITERIA, None, 5
+            reference_small, small, warp, mode, _MOTION_REVEAL_ECC_CRITERIA, None, 5
         )
-        if not np.isfinite(cc) or not np.isfinite(warp).all():
-            return None, 0.0
-        if scale < 1.0:
-            warp = warp.copy()
-            warp[:, 2] /= scale
-        return warp, float(cc)
     except cv2.error:
-        return None, 0.0
+        return None
+    if not np.isfinite(cc) or not np.isfinite(warp).all():
+        return None
+    if scale < 1.0:
+        warp = warp.copy()
+        warp[:, 2] /= scale
+    max_dim = max(reference_small.shape[:2]) / scale
+    if np.hypot(warp[0, 2], warp[1, 2]) > _MOTION_REVEAL_MAX_WARP_TRANSLATION * max_dim:
+        return None
+    if (
+        np.linalg.norm(warp[:, :2] - np.eye(2, dtype=np.float32))
+        > _MOTION_REVEAL_MAX_WARP_LINEAR
+    ):
+        return None
+    return warp
 
 
 def _is_static(reference_gray: np.ndarray, gray: np.ndarray) -> bool:
@@ -344,7 +361,7 @@ def _dense_align_residual(
         ), valid
     except (cv2.error, ValueError):
         logger.warning(
-            "Failed to refine motion-reveal residual alignment; using translation only",
+            "Failed to refine motion-reveal residual alignment; using the unaligned residual",
             exc_info=True,
         )
         return residual, np.ones((h, w), dtype=np.float32)
@@ -418,11 +435,10 @@ def build_motion_reveal_images(frame_jpegs: list[bytes]) -> list[bytes]:
         return []
 
     originals_u8 = np.stack(decoded, axis=0)
-    originals = originals_u8.astype(np.float32)
 
     raw_median = _temporal_median(originals_u8)
-    raw_residual = _residual_magnitude(originals, raw_median)
-    raw_p99 = np.percentile(raw_residual.reshape(len(originals), -1), 99, axis=1)
+    raw_residual = _residual_magnitude(originals_u8, raw_median)
+    raw_p99 = np.percentile(raw_residual.reshape(len(originals_u8), -1), 99, axis=1)
     if (
         not _MOTION_REVEAL_PREGATE_P99[0]
         <= float(np.median(raw_p99))
@@ -430,46 +446,37 @@ def build_motion_reveal_images(frame_jpegs: list[bytes]) -> list[bytes]:
     ):
         return []
 
-    scale = _ecc_working_scale(*originals_u8.shape[1:3])
     reference_gray = _to_gray_u8(raw_median)
-    reference_gray_f32 = reference_gray.astype(np.float32)
-    reference_small = _ecc_downscale(reference_gray, scale)
-    aligned = []
-    retained_indices = []
-    warped_any = False
-    for index, frame_u8 in enumerate(originals_u8):
-        gray = cv2.cvtColor(frame_u8, cv2.COLOR_BGR2GRAY)
-        if _is_static(reference_gray_f32, gray.astype(np.float32)):
-            aligned.append(originals[index])
-            retained_indices.append(index)
-            continue
-        warp, _ = _ecc_align(
-            reference_small, _ecc_downscale(gray, scale), cv2.MOTION_AFFINE, scale
-        )
-        if warp is None:
-            continue
-        aligned.append(_warp(originals[index], warp))
-        retained_indices.append(index)
-        warped_any = True
-    if len(aligned) < _MOTION_REVEAL_MIN_FRAMES:
-        return []
-    del originals_u8
+    warps: dict[int, np.ndarray] = {}
+    if _cover_gradient(reference_gray) >= _MOTION_REVEAL_MIN_COVER_GRADIENT:
+        scale = _ecc_working_scale(*originals_u8.shape[1:3])
+        reference_gray_f32 = reference_gray.astype(np.float32)
+        reference_small = _ecc_downscale(reference_gray, scale)
+        for index, frame_u8 in enumerate(originals_u8):
+            gray = cv2.cvtColor(frame_u8, cv2.COLOR_BGR2GRAY)
+            if _is_static(reference_gray_f32, gray.astype(np.float32)):
+                continue
+            warp = _ecc_align(
+                reference_small, _ecc_downscale(gray, scale), cv2.MOTION_AFFINE, scale
+            )
+            if warp is not None:
+                warps[index] = warp
+    del reference_gray
 
-    if not warped_any and len(aligned) == len(originals):
-        stack, median, residual, per_frame_p99 = (
-            originals,
-            raw_median,
-            raw_residual,
-            raw_p99,
-        )
+    if not warps:
+        stack: np.ndarray = originals_u8
+        median, residual, per_frame_p99 = raw_median, raw_residual, raw_p99
     else:
-        stack = np.stack(aligned, axis=0)
-        originals = originals[retained_indices]
+        stack = np.empty(originals_u8.shape, dtype=np.float32)
+        for index, frame_u8 in enumerate(originals_u8):
+            warp = warps.get(index)
+            stack[index] = (
+                frame_u8 if warp is None else _warp(frame_u8.astype(np.float32), warp)
+            )
         median = np.median(stack, axis=0)
         residual = _residual_magnitude(stack, median)
-        per_frame_p99 = np.percentile(residual.reshape(len(aligned), -1), 99, axis=1)
+        per_frame_p99 = np.percentile(residual.reshape(len(stack), -1), 99, axis=1)
     del raw_residual
-    residual_frames = stack - median[None]
     motion_energy = residual.mean(axis=(1, 2))
     if (
         not _MOTION_REVEAL_MIN_RESIDUAL_P99
@@ -487,7 +494,7 @@ def build_motion_reveal_images(frame_jpegs: list[bytes]) -> list[bytes]:
     )
 
     windows = np.array_split(
-        np.arange(len(aligned)), max(1, len(aligned) // _MOTION_REVEAL_WINDOW_FRAMES)
+        np.arange(len(stack)), max(1, len(stack) // _MOTION_REVEAL_WINDOW_FRAMES)
     )
     overlays: list[np.ndarray] = []
     overlay_energy: list[float] = []
@@ -495,7 +502,7 @@ def build_motion_reveal_images(frame_jpegs: list[bytes]) -> list[bytes]:
     reference_frames: list[int] = []
     for window in windows:
         ref = int(window[np.argmax(motion_energy[window])])
-        reference = residual_frames[ref]
+        reference = stack[ref] - median
         samples = [reference]
         sample_weights = [np.ones(reference.shape[:2], dtype=np.float32)]
         magnitude = max(1.0, float(np.percentile(np.abs(reference), 85)))
@@ -503,7 +510,7 @@ def build_motion_reveal_images(frame_jpegs: list[bytes]) -> list[bytes]:
             if i == ref:
                 continue
             aligned_residual, valid = _dense_align_residual(
-                reference, residual_frames[i], min(16.0, 96 / magnitude)
+                reference, stack[i] - median, min(16.0, 96 / magnitude)
             )
             difference = cv2.GaussianBlur(
                 np.abs(aligned_residual - reference).mean(axis=-1), (0, 0), 1.2
@@ -530,9 +537,7 @@ def build_motion_reveal_images(frame_jpegs: list[bytes]) -> list[bytes]:
 
     best = int(np.argmax(score))
     encoded = _encode_reveal(
-        np.concatenate(
-            [originals[reference_frames[best]].astype(np.uint8), overlays[best]], axis=1
-        )
+        np.concatenate([originals_u8[reference_frames[best]], overlays[best]], axis=1)
     )
     if encoded:
         out.append(encoded)

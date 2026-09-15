@@ -430,15 +430,18 @@ impl PredictRequestBatch {
                                 dist_entry.candidate = Some(candidate.clone());
                             }
 
-                            if item.return_log_map {
+                            if item.return_logits_list {
+                                dist_entry.requested_action_logits = item
+                                    .requested_action_indices
+                                    .iter()
+                                    .map(|&idx| {
+                                        dist.get(idx as usize).copied().unwrap_or(f32::NEG_INFINITY)
+                                    })
+                                    .collect();
+                            } else if item.return_log_map {
                                 for idx in item.requested_action_indices.iter() {
                                     if let Some(v) = dist.get(*idx as usize) {
                                         dist_entry.index_to_logits.insert(*idx, *v);
-                                    }
-                                }
-                                for idx in item.requested_continuous_action_indices.iter() {
-                                    if let Some(v) = cont_pred.get(*idx as usize) {
-                                        dist_entry.index_to_continuous_values.insert(*idx, *v);
                                     }
                                 }
                             } else if item.return_logprob {
@@ -447,6 +450,13 @@ impl PredictRequestBatch {
                             } else {
                                 dist_entry.logits = dist.to_vec();
                                 dist_entry.continuous_actions_values = cont_pred.to_vec();
+                            }
+                            if item.return_logits_list || item.return_log_map {
+                                for idx in item.requested_continuous_action_indices.iter() {
+                                    if let Some(v) = cont_pred.get(*idx as usize) {
+                                        dist_entry.index_to_continuous_values.insert(*idx, *v);
+                                    }
+                                }
                             }
 
                             dist_entry
@@ -1049,6 +1059,7 @@ impl RecsysPredictorImpl {
             request.return_logprob,
             request.top_logprobs_num,
             request.return_log_map,
+            request.return_logits_list,
             request.requested_action_indices,
             request.requested_continuous_action_indices,
             request.return_candidate_tweet_id_only,
@@ -1176,6 +1187,7 @@ async fn handle_request(
     return_logprob: bool,
     top_logprobs_num: u32,
     return_log_map: bool,
+    return_logits_list: bool,
     requested_action_indices: Vec<u32>,
     requested_continuous_action_indices: Vec<u32>,
     return_candidate_tweet_id_only: bool,
@@ -1302,6 +1314,7 @@ async fn handle_request(
         return_logprob,
         top_logprobs_num,
         return_log_map,
+        return_logits_list,
         requested_action_indices,
         requested_continuous_action_indices,
         return_candidate_tweet_id_only,

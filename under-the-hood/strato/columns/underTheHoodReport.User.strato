@@ -1,5 +1,6 @@
 import <visibility/under-the-hood/sharedConfig>
 import <visibility/under-the-hood/underTheHoodLabels>
+import <visibility/under-the-hood/params>
 
 type Key = Long
 type View = Unit
@@ -86,12 +87,18 @@ def monthPublishCalendarReady(monthBucket: Int, now: Time.T): Boolean = {
   now.inMillis >= monthEndStart.plus(minDaysAfterMonthEnd.days).inMillis
 }
 
-def reportMonthBucket(now: Time.T): Int = {
+def reportMonthBucket(now: Time.T, maxMonthBucket: Int): Int = {
   val candidate = calendarMonthBefore(now)
-  if (monthPublishCalendarReady(candidate, now)) {
-    candidate
+  val calendarMonth =
+    if (monthPublishCalendarReady(candidate, now)) {
+      candidate
+    } else {
+      monthBucketBefore(candidate)
+    }
+  if (maxMonthBucket > 0 && calendarMonth > maxMonthBucket) {
+    maxMonthBucket
   } else {
-    monthBucketBefore(candidate)
+    calendarMonth
   }
 }
 
@@ -305,7 +312,7 @@ val fetchOp = Op.fetch[Key, View, Value] { ctx =>
       meetsAccountAgeMinimum(user, now)
     }).getOrElse(false)
 
-  val primaryMonth = reportMonthBucket(now)
+  val primaryMonth = reportMonthBucket(now, params.underTheHoodReportMaxMonthBucket())
   val primaryUserKey: UthUserMonthKey = {
     userId = ctx.key,
     monthBucket = primaryMonth,
@@ -405,8 +412,9 @@ Managed({
   }),
   description = PlainText(
     "Per-user Under the Hood transparency report (keyed by user id). " +
-      "Picks the latest prior UTC month past the 10-day calendar floor (keep at 10+); if that " +
-      "month lacks complete observation (finalThroughDay), falls back one month. " +
+      "Picks the latest prior UTC month past the 10-day calendar floor (keep at 10+), capped by FS " +
+      "under_the_hood_report_max_month_bucket when > 0; if that month lacks complete observation " +
+      "(finalThroughDay), falls back one month. " +
       "Uses the per-user row when present; if missing, userId=-1 month-meta can still return " +
       "reportInfo without reportJson. Missing only when both user and meta are absent/incomplete. " +
       "eligibilityChecks = posts/age only. Called by underTheHoodReport for the authenticated viewer."
